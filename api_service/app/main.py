@@ -13,7 +13,7 @@ app = FastAPI()
 async def startup():
     await init_db()
 
-@app.post("/ask", response_model=AnswerResponse)
+@app.post("/api/ask", response_model=AnswerResponse)
 async def ask_question(question: QuestionCreate, session: AsyncSession = Depends(async_session)):
     redis = get_redis_client()
     cache_key = f"answer:{question.question_text}"
