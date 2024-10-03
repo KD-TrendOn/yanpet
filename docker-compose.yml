@@ -60,6 +60,7 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
     command: >
       --model Qwen/Qwen2.5-3B-Instruct
+      --dtype half
       --api-key token-abc123
     shm_size: '1gb'
     ipc: host
