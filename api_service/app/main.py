@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import aiohttp
 import json
 
-app = FastAPI(docs_url="/api/docs")
+app = FastAPI()
 
 @app.on_event("startup")
 async def startup():
