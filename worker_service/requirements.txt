@@ -1,0 +1,4 @@
+celery
+SQLAlchemy
+asyncpg
+requests

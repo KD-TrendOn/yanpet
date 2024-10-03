@@ -1,0 +1,108 @@
+version: "3.9"
+services:
+  api_service_1:
+    build: ./api_service
+    depends_on:
+      - db
+      - redis
+      - worker_service_1
+    networks:
+      - backend
+
+  api_service_2:
+    build: ./api_service
+    depends_on:
+      - db
+      - redis
+      - worker_service_2
+    networks:
+      - backend
+
+  worker_service_1:
+    build: ./worker_service
+    depends_on:
+      - db
+      - llm_service
+    networks:
+      - backend
+
+  worker_service_2:
+    build: ./worker_service
+    depends_on:
+      - db
+      - llm_service
+    networks:
+      - backend
+
+  llm_service:
+    build: ./llm_service
+    depends_on:
+      - vllm_service
+    environment:
+      - VLLM_BASE_URL=http://vllm_service:8000
+      - VLLM_API_KEY=token-abc123
+    networks:
+      - backend
+
+  vllm_service:
+    image: vllm/vllm-openai:latest
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=<your_huggingface_token>
+    command: >
+      --model Qwen/Qwen2.5-3B-Instruct
+      --api-key token-abc123
+    shm_size: '1gb'
+    ipc: host
+    ports:
+      - "8000:8000"
+    networks:
+      - backend
+
+  nginx:
+    build: ./nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - api_service_1
+      - api_service_2
+    networks:
+      - backend
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "15672:15672"
+    networks:
+      - backend
+
+  db:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mydatabase
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  redis:
+    image: redis:6
+    networks:
+      - backend
+
+volumes:
+  db_data:
+
+networks:
+  backend:
