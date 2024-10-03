@@ -57,7 +57,7 @@ services:
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     environment:
-      - HUGGING_FACE_HUB_TOKEN=<your_huggingface_token>
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
     command: >
       --model Qwen/Qwen2.5-3B-Instruct
       --api-key token-abc123
