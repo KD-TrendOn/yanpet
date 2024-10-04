@@ -36,7 +36,7 @@ def login():
             # Set the authenticated flag
             st.session_state.authenticated = True
             # Force a rerun to update the interface
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.error("Неверные учетные данные.")
 
