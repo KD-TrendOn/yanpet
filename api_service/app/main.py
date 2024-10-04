@@ -19,15 +19,15 @@ app.include_router(auth_router, tags=["auth"])
 async def startup():
     await init_db()
 
-async def get_current_user(token: str = Depends(lambda: None), session: AsyncSession = Depends(scoped_session_dependency)):
+from auth import oauth2_scheme
+
+async def get_current_user(token: str = Depends(oauth2_scheme), session: AsyncSession = Depends(scoped_session_dependency)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    if token is None:
-        raise credentials_exception
-
+    # Now token is correctly extracted from the Authorization header
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
@@ -39,6 +39,7 @@ async def get_current_user(token: str = Depends(lambda: None), session: AsyncSes
     if user is None:
         raise credentials_exception
     return user
+
 
 @app.post("/api/ask", response_model=QuestionResponse)
 async def ask_question(question: QuestionCreate, current_user: User = Depends(get_current_user), session: AsyncSession = Depends(scoped_session_dependency)):
