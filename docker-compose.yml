@@ -77,14 +77,14 @@ services:
       - backend
 
   nginx:
-  build: ./nginx
-  ports:
-    - "8080:80"
-  depends_on:
-    - api_service
-    - frontend
-  networks:
-    - backend
+    build: ./nginx
+    ports:
+      - "8080:80"
+    depends_on:
+      - api_service
+      - frontend
+    networks:
+      - backend
 
 
   rabbitmq:
