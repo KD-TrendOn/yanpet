@@ -4,3 +4,4 @@ SQLAlchemy[asyncio]
 asyncpg
 aiohttp
 aioredis
+celery
