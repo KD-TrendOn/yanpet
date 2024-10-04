@@ -33,7 +33,7 @@ async def ask_question(question: QuestionCreate, session: AsyncSession = Depends
     # Send task to Celery
     celery_app.send_task('tasks.process_question', args=[new_question.id])
     
-    return AnswerResponse(answer_text="Your question is being processed. Please try again later.")
+    return QuestionResponse(question_id=new_question.id, answer_text="Ваш вопрос обрабатывается. Пожалуйста, попробуйте позже.")
 
 @app.get("/api/answer/{question_id}", response_model=AnswerResponse)
 async def get_answer(question_id: int, session: AsyncSession = Depends(async_session)):
