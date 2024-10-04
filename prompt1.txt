@@ -1,0 +1,765 @@
+├── api_service/
+│   ├── Dockerfile
+│   ├── app/
+│   │   ├── auth.py
+│   │   ├── cache.py
+│   │   ├── celery_app.py
+│   │   ├── database.py
+│   │   ├── main.py
+│   │   ├── models.py
+│   │   └── schemas.py
+├── docker-compose.yml
+├── frontend/
+│   ├── Dockerfile
+│   ├── app.py
+├── llm_service/
+│   ├── Dockerfile
+│   ├── app/
+│   │   └── main.py
+├── nginx/
+│   ├── Dockerfile
+│   └── default.conf
+├── vllm_service/
+└── worker_service/
+    ├── Dockerfile
+    ├── app/
+    │   ├── cache.py
+    │   ├── database.py
+    │   ├── llm_client.py
+    │   ├── models.py
+    │   └── tasks.py
+
+api_service/Dockerfile
+
+# api_service/Dockerfile
+
+FROM python:3.10
+
+WORKDIR /app
+
+COPY ./app /app
+COPY ./requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+api_service/app/auth.py
+
+# api_service/app/auth.py
+
+from fastapi import APIRouter, Depends, HTTPException
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from models import User
+from schemas import UserCreate, UserResponse, Token
+from database import scoped_session_dependency
+
+import os
+
+SECRET_KEY = os.getenv('SECRET_KEY', 'your-secret-key')
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+auth_router = APIRouter()
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+async def get_user(session: AsyncSession, username: str):
+    result = await session.execute(select(User).where(User.username == username))
+    return result.scalar_one_or_none()
+
+async def authenticate_user(session: AsyncSession, username: str, password: str):
+    user = await get_user(session, username)
+    if not user:
+        return False
+    if not verify_password(password, user.hashed_password):
+        return False
+    return user
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+@auth_router.post("/api/register", response_model=UserResponse)
+async def register(user: UserCreate, session: AsyncSession = Depends(scoped_session_dependency)):
+    db_user = await get_user(session, user.username)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    hashed_password = get_password_hash(user.password)
+    new_user = User(username=user.username, hashed_password=hashed_password)
+    session.add(new_user)
+    await session.commit()
+    await session.refresh(new_user)
+    return UserResponse(id=new_user.id, username=new_user.username)
+
+@auth_router.post("/api/login", response_model=Token)
+async def login_for_access_token(form_data: UserCreate, session: AsyncSession = Depends(scoped_session_dependency)):
+    user = await authenticate_user(session, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(data={"sub": user.username}, expires_delta=access_token_expires)
+    return Token(access_token=access_token, token_type="bearer")
+
+
+api_service/app/cache.py
+
+import aioredis
+import os
+
+redis_host = os.getenv("REDIS_HOST", "redis")
+redis = None
+
+def get_redis_client():
+    global redis
+    if redis is None:
+        redis = aioredis.from_url(f"redis://{redis_host}")
+    return redis
+
+
+api_service/app/celery_app.py
+
+from celery import Celery
+import os
+
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "amqp://guest@rabbitmq//")
+
+celery_app = Celery('api_service', broker=CELERY_BROKER_URL)
+
+
+api_service/app/database.py
+
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession,async_sessionmaker, async_scoped_session
+import os
+from asyncio import current_task
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@db:5432/mydatabase")
+
+engine = create_async_engine(DATABASE_URL, echo=True)
+async_session = async_sessionmaker(bind=engine, expire_on_commit=False,)
+def get_scoped_session():
+        session = async_scoped_session(
+            session_factory=async_session,
+            scopefunc=current_task,
+        )
+        return session
+async def scoped_session_dependency() -> AsyncSession:
+        session = get_scoped_session()
+        yield session
+        await session.close()
+
+
+async def init_db():
+    async with engine.begin() as conn:
+        from models import Question
+        from models import Answer
+        from models import Base
+        await conn.run_sync(Base.metadata.create_all)
+
+
+api_service/app/main.py
+
+# api_service/app/main.py
+
+from fastapi import FastAPI, Depends, HTTPException, status
+from sqlalchemy.future import select
+from models import Question, Answer, User
+from schemas import QuestionCreate, AnswerResponse, QuestionResponse
+from database import async_session, init_db, scoped_session_dependency
+from cache import get_redis_client
+from sqlalchemy.ext.asyncio import AsyncSession
+from celery_app import celery_app
+from auth import auth_router, get_user, SECRET_KEY, ALGORITHM
+from jose import JWTError, jwt
+
+app = FastAPI()
+
+app.include_router(auth_router, tags=["auth"])
+
+@app.on_event("startup")
+async def startup():
+    await init_db()
+
+async def get_current_user(token: str = Depends(lambda: None), session: AsyncSession = Depends(scoped_session_dependency)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if token is None:
+        raise credentials_exception
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = await get_user(session, username=username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+@app.post("/api/ask", response_model=QuestionResponse)
+async def ask_question(question: QuestionCreate, current_user: User = Depends(get_current_user), session: AsyncSession = Depends(scoped_session_dependency)):
+    redis = get_redis_client()
+    cache_key = f"answer:{question.question_text}"
+
+    cached_answer = await redis.get(cache_key)
+    if cached_answer:
+        return AnswerResponse(answer_text=cached_answer)
+
+    new_question = Question(question_text=question.question_text, user_id=current_user.id)
+    session.add(new_question)
+    await session.commit()
+    await session.refresh(new_question)
+
+    # Send task to Celery
+    celery_app.send_task('tasks.process_question', args=[new_question.id])
+
+    return QuestionResponse(question_id=new_question.id, answer_text="Ваш вопрос обрабатывается. Пожалуйста, попробуйте позже.")
+
+@app.get("/api/answer/{question_id}", response_model=AnswerResponse)
+async def get_answer(question_id: int, current_user: User = Depends(get_current_user), session: AsyncSession = Depends(scoped_session_dependency)):
+    redis = get_redis_client()
+    cache_key = f"answer:{question_id}"
+    cached_answer = await redis.get(cache_key)
+    if cached_answer:
+        return AnswerResponse(answer_text=cached_answer)
+
+    result = await session.execute(
+        select(Answer).join(Question).where(Answer.question_id == question_id, Question.user_id == current_user.id)
+    )
+    answer = result.scalar_one_or_none()
+    if answer:
+        await redis.set(cache_key, answer.answer_text)
+        return AnswerResponse(answer_text=answer.answer_text)
+    else:
+        return AnswerResponse(answer_text="Ответ еще не готов.")
+
+
+api_service/app/models.py
+
+# api_service/app/models.py
+
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, Integer, String, ForeignKey
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+
+class Question(Base):
+    __tablename__ = 'questions'
+    id = Column(Integer, primary_key=True, index=True)
+    question_text = Column(String)
+    user_id = Column(Integer, ForeignKey('users.id'))
+
+class Answer(Base):
+    __tablename__ = 'answers'
+    id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(Integer, ForeignKey('questions.id'))
+    answer_text = Column(String)
+
+
+api_service/app/schemas.py
+
+# api_service/app/schemas.py
+
+from pydantic import BaseModel
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+
+    class Config:
+        orm_mode = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class QuestionCreate(BaseModel):
+    question_text: str
+
+class AnswerResponse(BaseModel):
+    answer_text: str
+
+class QuestionResponse(BaseModel):
+    question_id: int
+    answer_text: str
+
+
+docker-compose.yml
+
+version: "3.9"
+services:
+  api_service:
+    build: ./api_service
+    ports:
+      - "8000"
+    depends_on:
+      - db
+      - redis
+      - rabbitmq
+    environment:
+      - CELERY_BROKER_URL=amqp://guest@rabbitmq//
+      - SECRET_KEY=${AUTH_SECRET_KEY}
+    networks:
+      - backend
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+
+  frontend:
+    build: ./frontend
+    networks:
+      - backend
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+
+  worker_service:
+    build: ./worker_service
+    depends_on:
+      - db
+      - rabbitmq
+      - llm_service
+    environment:
+      - CELERY_BROKER_URL=amqp://guest@rabbitmq//
+    networks:
+      - backend
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+
+  llm_service:
+    build: ./llm_service
+    depends_on:
+      - vllm_service
+    environment:
+      - VLLM_BASE_URL=http://vllm_service:8000
+      - VLLM_API_KEY=token-abc123
+    networks:
+      - backend
+
+  vllm_service:
+    image: vllm/vllm-openai:latest
+    runtime: nvidia
+    deploy:
+      replicas: 1
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    command: >
+      --model Qwen/Qwen2.5-3B-Instruct
+      --dtype half
+      --api-key token-abc123
+    shm_size: '1gb'
+    ipc: host
+    ports:
+      - "8000:8000"
+    networks:
+      - backend
+
+  nginx:
+    build: ./nginx
+    ports:
+      - "8080:80"
+    depends_on:
+      - api_service
+      - frontend
+    networks:
+      - backend
+
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "15672:15672"
+    networks:
+      - backend
+
+  db:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mydatabase
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  redis:
+    image: redis:6
+    networks:
+      - backend
+
+volumes:
+  db_data:
+
+networks:
+  backend:
+    driver: bridge
+
+frontend/Dockerfile
+
+# frontend/Dockerfile
+
+FROM python:3.10-slim
+
+WORKDIR /app
+
+COPY ./app.py /app/app.py
+COPY ./requirements.txt /app/requirements.txt
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0"]
+
+
+frontend/app.py
+
+# frontend/app.py
+
+import streamlit as st
+import requests
+
+import os
+
+API_BASE_URL = os.getenv('API_BASE_URL', 'http://nginx/api')
+TOKEN = None
+
+def register():
+    st.title("Регистрация")
+    username = st.text_input("Имя пользователя")
+    password = st.text_input("Пароль", type="password")
+    if st.button("Зарегистрироваться"):
+        response = requests.post(f"{API_BASE_URL}/register", json={
+            "username": username,
+            "password": password
+        })
+        if response.status_code == 200:
+            st.success("Успешная регистрация. Теперь вы можете войти.")
+        else:
+            st.error("Ошибка регистрации.")
+
+def login():
+    st.title("Вход")
+    username = st.text_input("Имя пользователя")
+    password = st.text_input("Пароль", type="password")
+    if st.button("Войти"):
+        response = requests.post(f"{API_BASE_URL}/login", json={
+            "username": username,
+            "password": password
+        })
+        if response.status_code == 200:
+            data = response.json()
+            global TOKEN
+            TOKEN = data["access_token"]
+            st.success("Успешный вход.")
+            st.session_state.authenticated = True
+        else:
+            st.error("Неверные учетные данные.")
+
+def ask_question():
+    st.title("Задайте вопрос")
+    question_text = st.text_input("Ваш вопрос")
+    if st.button("Отправить вопрос"):
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        response = requests.post(f"{API_BASE_URL}/ask", json={
+            "question_text": question_text
+        }, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            st.success("Вопрос отправлен. ID вопроса: {}".format(data["question_id"]))
+        else:
+            st.error("Ошибка отправки вопроса.")
+
+def get_answer():
+    st.title("Получить ответ")
+    question_id = st.number_input("ID вопроса", min_value=1, step=1)
+    if st.button("Получить ответ"):
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        response = requests.get(f"{API_BASE_URL}/answer/{question_id}", headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            st.write("Ответ: {}".format(data["answer_text"]))
+        else:
+            st.error("Ошибка получения ответа.")
+
+def main():
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+
+    menu = ["Вход", "Регистрация", "Задать вопрос", "Получить ответ"]
+
+    if st.session_state.authenticated:
+        choice = st.sidebar.selectbox("Меню", menu[2:])
+        if choice == "Задать вопрос":
+            ask_question()
+        elif choice == "Получить ответ":
+            get_answer()
+    else:
+        choice = st.sidebar.selectbox("Меню", menu[:2])
+        if choice == "Вход":
+            login()
+        elif choice == "Регистрация":
+            register()
+
+if __name__ == '__main__':
+    main()
+
+
+llm_service/Dockerfile
+
+FROM python:3.10
+
+WORKDIR /app
+
+COPY ./app /app
+COPY ./requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
+
+
+llm_service/app/main.py
+
+import os
+from fastapi import FastAPI
+from pydantic import BaseModel
+import requests
+
+app = FastAPI()
+
+class PromptRequest(BaseModel):
+    prompt: str
+
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://vllm_service:8000")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "token-abc123")
+
+headers = {
+    "Authorization": f"Bearer {VLLM_API_KEY}",
+    "Content-Type": "application/json"
+}
+
+@app.post("/generate")
+def generate_text(request: PromptRequest):
+    payload = {
+        "model": "Qwen/Qwen2.5-3B-Instruct",
+        "messages": [{"role": "user", "content": request.prompt}]
+    }
+    response = requests.post(f"{VLLM_BASE_URL}/v1/chat/completions", json=payload, headers=headers)
+    answer = response.json()["choices"][0]["message"]["content"]
+    return {"answer": answer}
+
+
+nginx/Dockerfile
+
+FROM nginx:latest
+
+COPY default.conf /etc/nginx/conf.d/default.conf
+
+
+nginx/default.conf
+
+upstream api_service {
+    least_conn;
+    server api_service:8000;
+}
+
+upstream frontend {
+    least_conn;
+    server frontend:8501;
+}
+
+server {
+    listen 80;
+
+    location /api/ {
+        proxy_pass http://api_service;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /static {
+        proxy_pass http://frontend/static;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location / {
+        proxy_pass http://frontend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+
+
+worker_service/Dockerfile
+
+FROM python:3.10
+
+WORKDIR /app
+
+COPY ./app /app
+COPY ./requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+CMD ["celery", "-A", "tasks", "worker", "--loglevel=info"]
+
+
+worker_service/app/cache.py
+
+import redis
+import os
+
+redis_host = os.getenv("REDIS_HOST", "redis")
+redis_port = int(os.getenv("REDIS_PORT", 6379))
+
+def get_redis_client():
+    return redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+
+
+worker_service/app/database.py
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import os
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@db:5432/mydatabase")
+
+# Create an engine
+engine = create_engine(DATABASE_URL, echo=True)
+
+# Create a configured "Session" class
+SessionLocal = sessionmaker(bind=engine)
+
+# Base class for our models
+from sqlalchemy.ext.declarative import declarative_base
+
+Base = declarative_base()
+
+
+worker_service/app/llm_client.py
+
+import requests
+import os
+
+LLM_SERVICE_URL = os.getenv("LLM_SERVICE_URL", "http://llm_service:8002/generate")
+
+def get_llm_answer(question_text):
+    try:
+        response = requests.post(LLM_SERVICE_URL, json={"prompt": question_text})
+        response.raise_for_status()
+        data = response.json()
+        answer = data.get("answer", "")
+        return answer
+    except Exception as e:
+        print(f"Error contacting LLM service: {e}")
+        return "Could not get an answer at this time."
+
+
+worker_service/app/models.py
+
+from database import Base
+from sqlalchemy import Column, Integer, String, ForeignKey
+
+class Question(Base):
+    __tablename__ = 'questions'
+    id = Column(Integer, primary_key=True, index=True)
+    question_text = Column(String, index=True)
+
+class Answer(Base):
+    __tablename__ = 'answers'
+    id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(Integer, ForeignKey('questions.id'))
+    answer_text = Column(String)
+
+
+worker_service/app/tasks.py
+
+from models import Question, Answer
+from database import SessionLocal, engine
+from llm_client import get_llm_answer
+from cache import get_redis_client
+from sqlalchemy.orm import Session
+
+from celery import Celery
+import os
+
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "amqp://guest@rabbitmq//")
+
+app = Celery('worker_service', broker=CELERY_BROKER_URL)
+
+# Ensure all tables are created (if not already done)
+# You might not need this if migrations are handled elsewhere
+from database import Base
+Base.metadata.create_all(bind=engine)
+
+@app.task(name='tasks.process_question')
+def process_question(question_id):
+    # Create a new database session
+    session = SessionLocal()
+    try:
+        # Query the question
+        question = session.query(Question).filter(Question.id == question_id).first()
+        if question is None:
+            print(f"Question with id {question_id} not found.")
+            return
+
+        # Get the answer from the LLM service
+        answer_text = get_llm_answer(question.question_text)
+
+        # Create a new answer record
+        new_answer = Answer(question_id=question_id, answer_text=answer_text)
+        session.add(new_answer)
+        session.commit()
+
+        # Cache the answer
+        redis = get_redis_client()
+        cache_key = f"answer:{question.question_text}"
+        redis.set(cache_key, answer_text)
+    except Exception as e:
+        print(f"An error occurred while processing question {question_id}: {e}")
+        session.rollback()
+    finally:
+        # Close the session
+        session.close()
