@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends
 from models import Question, Answer
 from schemas import QuestionCreate, AnswerResponse
-from database import async_session, init_db
+from database import async_session, init_db, scoped_session_dependency
 from cache import get_redis_client
 from sqlalchemy.ext.asyncio import AsyncSession
 import aiohttp
@@ -14,7 +14,7 @@ async def startup():
     await init_db()
 
 @app.post("/api/ask", response_model=AnswerResponse)
-async def ask_question(question: QuestionCreate, session: AsyncSession = Depends(async_session)):
+async def ask_question(question: QuestionCreate, session: AsyncSession = Depends(scoped_session_dependency)):
     redis = get_redis_client()
     cache_key = f"answer:{question.question_text}"
 
