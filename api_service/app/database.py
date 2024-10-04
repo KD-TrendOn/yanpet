@@ -5,13 +5,13 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@db:
 
 engine = create_async_engine(DATABASE_URL, echo=True)
 async_session = async_sessionmaker(bind=engine, expire_on_commit=False,)
-def get_scoped_session(self):
+def get_scoped_session():
         session = async_scoped_session(
-            session_factory=self.session_factory,
+            session_factory=async_session,
             scopefunc=current_task,
         )
         return session
-async def scoped_session_dependency(self) -> AsyncSession:
+async def scoped_session_dependency() -> AsyncSession:
         session = get_scoped_session()
         yield session
         await session.close()
