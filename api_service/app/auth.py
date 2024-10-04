@@ -46,7 +46,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-@auth_router.post("/register", response_model=UserResponse)
+@auth_router.post("/api/register", response_model=UserResponse)
 async def register(user: UserCreate, session: AsyncSession = Depends(scoped_session_dependency)):
     db_user = await get_user(session, user.username)
     if db_user:
@@ -58,7 +58,7 @@ async def register(user: UserCreate, session: AsyncSession = Depends(scoped_sess
     await session.refresh(new_user)
     return UserResponse(id=new_user.id, username=new_user.username)
 
-@auth_router.post("/login", response_model=Token)
+@auth_router.post("/api/login", response_model=Token)
 async def login_for_access_token(form_data: UserCreate, session: AsyncSession = Depends(scoped_session_dependency)):
     user = await authenticate_user(session, form_data.username, form_data.password)
     if not user:
