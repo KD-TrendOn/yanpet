@@ -21,5 +21,7 @@ async def init_db():
     async with engine.begin() as conn:
         from models import Question
         from models import Answer
+        from models import User
         from models import Base
+        await conn.run_sync(Base.metadata.drop_all)  # WARNING: This will drop all tables
         await conn.run_sync(Base.metadata.create_all)
