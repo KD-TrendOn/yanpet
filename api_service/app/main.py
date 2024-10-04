@@ -48,7 +48,7 @@ async def ask_question(question: QuestionCreate, current_user: User = Depends(ge
 
     cached_answer = await redis.get(cache_key)
     if cached_answer:
-        return AnswerResponse(answer_text=cached_answer)
+        return QuestionResponse(question_id=0, answer_text=cached_answer)
 
     new_question = Question(question_text=question.question_text, user_id=current_user.id)
     session.add(new_question)
