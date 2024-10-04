@@ -2,4 +2,4 @@ celery
 SQLAlchemy
 asyncpg
 requests
-aioredis
+redis

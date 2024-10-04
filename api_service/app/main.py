@@ -6,6 +6,7 @@ from cache import get_redis_client
 from sqlalchemy.ext.asyncio import AsyncSession
 import aiohttp
 import json
+from celery_app import celery_app  # Import the Celery app
 
 app = FastAPI()
 
@@ -28,7 +29,6 @@ async def ask_question(question: QuestionCreate, session: AsyncSession = Depends
     await session.refresh(new_question)
     
     # Send task to Celery
-    async with aiohttp.ClientSession() as client:
-        await client.post("http://worker_service:8001/process", json={"question_id": new_question.id})
+    celery_app.send_task('tasks.process_question', args=[new_question.id])
     
     return AnswerResponse(answer_text="Your question is being processed. Please try again later.")

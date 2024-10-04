@@ -1,38 +1,36 @@
 version: "3.9"
 services:
-  api_service_1:
+  api_service:
     build: ./api_service
+    ports:
+      - "8000"
     depends_on:
       - db
       - redis
-      - worker_service_1
+      - rabbitmq
+    environment:
+      - CELERY_BROKER_URL=amqp://guest@rabbitmq//
     networks:
       - backend
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
 
-  api_service_2:
-    build: ./api_service
-    depends_on:
-      - db
-      - redis
-      - worker_service_2
-    networks:
-      - backend
-
-  worker_service_1:
+  worker_service:
     build: ./worker_service
     depends_on:
       - db
+      - rabbitmq
       - llm_service
+    environment:
+      - CELERY_BROKER_URL=amqp://guest@rabbitmq//
     networks:
       - backend
-
-  worker_service_2:
-    build: ./worker_service
-    depends_on:
-      - db
-      - llm_service
-    networks:
-      - backend
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
 
   llm_service:
     build: ./llm_service
@@ -48,6 +46,7 @@ services:
     image: vllm/vllm-openai:latest
     runtime: nvidia
     deploy:
+      replicas: 1
       resources:
         reservations:
           devices:
@@ -74,8 +73,7 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - api_service_1
-      - api_service_2
+      - api_service
     networks:
       - backend
 
@@ -107,3 +105,4 @@ volumes:
 
 networks:
   backend:
+    driver: bridge
