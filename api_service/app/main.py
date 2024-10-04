@@ -36,7 +36,7 @@ async def ask_question(question: QuestionCreate, session: AsyncSession = Depends
     return QuestionResponse(question_id=new_question.id, answer_text="Ваш вопрос обрабатывается. Пожалуйста, попробуйте позже.")
 
 @app.get("/api/answer/{question_id}", response_model=AnswerResponse)
-async def get_answer(question_id: int, session: AsyncSession = Depends(async_session)):
+async def get_answer(question_id: int, session: AsyncSession = Depends(scoped_session_dependency)):
     # Попытка получить ответ из кэша
     redis = get_redis_client()
     cache_key = f"answer:{question_id}"
