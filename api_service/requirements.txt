@@ -1,7 +1,12 @@
+# api_service/requirements.txt
+
 fastapi
-uvicorn[standard]
-SQLAlchemy[asyncio]
+uvicorn
 asyncpg
-aiohttp
+sqlalchemy
+sqlalchemy[asyncio]
 aioredis
+pydantic
+passlib[bcrypt]
+python-jose[cryptography]
 celery
