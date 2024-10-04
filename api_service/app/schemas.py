@@ -5,3 +5,7 @@ class QuestionCreate(BaseModel):
 
 class AnswerResponse(BaseModel):
     answer_text: str
+
+class QuestionResponse(BaseModel):
+    question_id: int
+    answer_text: str
