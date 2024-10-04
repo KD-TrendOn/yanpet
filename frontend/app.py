@@ -45,7 +45,7 @@ def ask_question():
     question_text = st.text_input("Ваш вопрос")
     if st.button("Отправить вопрос"):
         headers = {"Authorization": f"Bearer {TOKEN}"}
-        response = requests.post(f"{API_BASE_URL}/api/ask", json={
+        response = requests.post(f"{API_BASE_URL}/ask", json={
             "question_text": question_text
         }, headers=headers)
         if response.status_code == 200:
@@ -59,7 +59,7 @@ def get_answer():
     question_id = st.number_input("ID вопроса", min_value=1, step=1)
     if st.button("Получить ответ"):
         headers = {"Authorization": f"Bearer {TOKEN}"}
-        response = requests.get(f"{API_BASE_URL}/api/answer/{question_id}", headers=headers)
+        response = requests.get(f"{API_BASE_URL}/answer/{question_id}", headers=headers)
         if response.status_code == 200:
             data = response.json()
             st.write("Ответ: {}".format(data["answer_text"]))
